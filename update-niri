@@ -35,14 +35,16 @@ get_installed_version() {
 INSTALLED_VERSION=$(get_installed_version)
 
 echo "Installed version: ${INSTALLED_VERSION:-Not Installed}"
-echo "Fetching latest release metadata..."
+echo "Fetching latest release..."
 
 RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
 
-TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-echo "Latest release: $TAG_NAME"
+# Validate GitHub response
+if ! echo "$RELEASE_JSON" | jq -e . >/dev/null 2>&1; then
+  echo "❌ Failed to parse GitHub API response."
+  exit 1
+fi
 
-# Only v3 build
 ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
   .assets[]
   | select(.name | contains("x86_64_v3.pkg.tar.zst"))
@@ -50,7 +52,7 @@ ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
 ' | head -n1)
 
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ No x86_64_v3 package found in release."
+  echo "❌ No x86_64_v3 package found in latest release."
   exit 1
 fi
 
@@ -59,26 +61,24 @@ PKG_FILE=$(basename "$ASSET_URL")
 LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
   's/^niri-git-(.*)-x86_64_v3\.pkg\.tar\.zst/\1/')
 
-echo "Latest package version: $LATEST_VERSION"
+echo "Latest version: $LATEST_VERSION"
 
+# Version comparison
 if [[ -n "$INSTALLED_VERSION" && "$FORCE" = false ]]; then
   if [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
-    echo "✅ Already up to date."
+    echo "Already up to date."
     exit 0
   fi
 fi
 
+# Confirmation only if installed and not auto mode
 if [[ "$AUTO_YES" = false ]]; then
-  echo
-  echo "1) Update"
-  echo "2) Force install"
-  read -rp "Enter choice (1/2): " CHOICE
-
-  if [[ "$CHOICE" == "2" ]]; then
-    FORCE=true
-  elif [[ "$CHOICE" != "1" ]]; then
-    echo "❌ Invalid choice"
-    exit 1
+  if [[ -n "$INSTALLED_VERSION" ]]; then
+    read -rp "Update niri-git to $LATEST_VERSION? [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
+  else
+    read -rp "Install niri-git $LATEST_VERSION? [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
   fi
 fi
 
@@ -95,14 +95,13 @@ done
 TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 
-echo "Downloading package..."
+echo "Downloading..."
 aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
 
-echo "Installing package..."
+echo "Installing..."
 sudo pacman -U --noconfirm "$PKG_FILE"
 
 cd /
 rm -rf "$TMP_DIR"
 
-echo
-echo "✅ niri-git $LATEST_VERSION installed successfully!"
+echo "✅ niri-git $LATEST_VERSION installed successfully."
