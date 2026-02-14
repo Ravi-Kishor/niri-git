@@ -29,17 +29,16 @@ require aria2c
 require vercmp
 
 get_installed_version() {
-  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo ""
+  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || true
 }
 
 INSTALLED_VERSION=$(get_installed_version)
 
 echo "Installed version: ${INSTALLED_VERSION:-Not Installed}"
-echo "Fetching latest release..."
+echo "📡 Fetching latest release..."
 
 RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
 
-# Validate GitHub response
 if ! echo "$RELEASE_JSON" | jq -e . >/dev/null 2>&1; then
   echo "❌ Failed to parse GitHub API response."
   exit 1
@@ -62,24 +61,35 @@ LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
   's/^niri-git-(.*)-x86_64_v3\.pkg\.tar\.zst/\1/')
 
 echo "Latest version: $LATEST_VERSION"
+echo
 
 # Version comparison
-if [[ -n "$INSTALLED_VERSION" && "$FORCE" = false ]]; then
+UP_TO_DATE=false
+if [[ -n "${INSTALLED_VERSION:-}" ]]; then
   if [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
-    echo "Already up to date."
-    exit 0
+    UP_TO_DATE=true
   fi
 fi
 
-# Confirmation only if installed and not auto mode
-if [[ "$AUTO_YES" = false ]]; then
-  if [[ -n "$INSTALLED_VERSION" ]]; then
-    read -rp "Update niri-git to $LATEST_VERSION? [y/N]: " CONFIRM
-    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
-  else
-    read -rp "Install niri-git $LATEST_VERSION? [y/N]: " CONFIRM
-    [[ "$CONFIRM" =~ ^[Yy]$ ]] || exit 0
-  fi
+# ---- INTERACTIVE MENU ----
+if [[ "$AUTO_YES" = false && "$FORCE" = false ]]; then
+  echo "Choose an action:"
+  echo "1) Update (skip if already latest)"
+  echo "2) Force reinstall"
+  echo "3) Cancel"
+  read -rp "Enter choice (1/2/3): " CHOICE
+
+  case "$CHOICE" in
+    1) ;;
+    2) FORCE=true ;;
+    *) echo "Cancelled."; exit 0 ;;
+  esac
+fi
+
+# Skip if already latest
+if [[ "$UP_TO_DATE" = true && "$FORCE" = false ]]; then
+  echo "✅ Already up to date."
+  exit 0
 fi
 
 echo "Preparing installation..."
@@ -95,10 +105,10 @@ done
 TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 
-echo "Downloading..."
+echo "⬇️ Downloading..."
 aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
 
-echo "Installing..."
+echo "📦 Installing..."
 sudo pacman -U --noconfirm "$PKG_FILE"
 
 cd /
