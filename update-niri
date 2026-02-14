@@ -4,6 +4,16 @@ set -euo pipefail
 REPO="Ravi-Kishor/niri-git"
 PKG_NAME="niri-git"
 
+AUTO_YES=false
+FORCE=false
+
+for arg in "$@"; do
+  case "$arg" in
+    -y|--yes) AUTO_YES=true ;;
+    -f|--force) FORCE=true ;;
+  esac
+done
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "❌ Required command '$1' not found"
@@ -11,44 +21,48 @@ require() {
   }
 }
 
-require aria2c
 require curl
 require jq
-require sudo
 require pacman
+require sudo
+require aria2c
+require vercmp
 
 get_installed_version() {
-  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo "Not Installed"
+  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo ""
+}
+
+supports_avx2() {
+  lscpu 2>/dev/null | grep -qi avx2
 }
 
 INSTALLED_VERSION=$(get_installed_version)
 
-echo "Installed package version: $INSTALLED_VERSION"
-echo "📡 Fetching latest release metadata…"
+echo "Installed version: ${INSTALLED_VERSION:-Not Installed}"
+echo "Fetching latest release metadata..."
 
 RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
 
 TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-echo "Latest release tag: $TAG_NAME"
+echo "Latest release: $TAG_NAME"
 
-# Prefer x86_64_v3 build
-ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
-  .assets[]
-  | select(.name | test("^niri-git-.*-x86_64_v3\\.pkg\\.tar\\.zst$"))
-  | .browser_download_url
-' | head -n1)
-
-# Fallback to generic x86_64
-if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
-    .assets[]
-    | select(.name | test("^niri-git-.*-x86_64\\.pkg\\.tar\\.zst$"))
-    | .browser_download_url
-  ' | head -n1)
+# Prefer v3 if CPU supports AVX2
+if supports_avx2; then
+  echo "CPU supports AVX2 → selecting x86_64_v3 build"
+  ASSET_PATTERN="^niri-git-.*-x86_64_v3\.pkg\.tar\.zst$"
+else
+  echo "CPU does not support AVX2 → selecting generic x86_64 build"
+  ASSET_PATTERN="^niri-git-.*-x86_64\.pkg\.tar\.zst$"
 fi
 
+ASSET_URL=$(echo "$RELEASE_JSON" | jq -r "
+  .assets[]
+  | select(.name | test(\"$ASSET_PATTERN\"))
+  | .browser_download_url
+" | head -n1)
+
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ Could not find niri-git package in release $TAG_NAME"
+  echo "❌ No compatible package found in release."
   exit 1
 fi
 
@@ -58,35 +72,45 @@ LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
   's/^niri-git-(.*)-x86_64(_v3)?\.pkg\.tar\.zst/\1/')
 
 echo "Latest package version: $LATEST_VERSION"
-echo
 
-echo "Choose an action:"
-echo "1) Update (skip if already latest)"
-echo "2) Force install"
-read -rp "Enter choice (1/2): " CHOICE
-
-if [[ "$CHOICE" == "1" ]]; then
-  if [[ "$INSTALLED_VERSION" == "$LATEST_VERSION" ]]; then
-    echo "✅ niri-git is already up to date"
+if [[ -n "$INSTALLED_VERSION" && "$FORCE" = false ]]; then
+  if [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
+    echo "✅ Already up to date."
     exit 0
   fi
-  echo "⬆️ Updating niri-git $INSTALLED_VERSION → $LATEST_VERSION"
-elif [[ "$CHOICE" == "2" ]]; then
-  echo "🛠️ Force installing niri-git $LATEST_VERSION"
-else
-  echo "❌ Invalid choice"
-  exit 1
 fi
+
+if [[ "$AUTO_YES" = false ]]; then
+  echo
+  echo "1) Update"
+  echo "2) Force install"
+  read -rp "Enter choice (1/2): " CHOICE
+
+  if [[ "$CHOICE" == "2" ]]; then
+    FORCE=true
+  elif [[ "$CHOICE" != "1" ]]; then
+    echo "❌ Invalid choice"
+    exit 1
+  fi
+fi
+
+echo "Preparing installation..."
+
+# Remove conflicting packages
+for pkg in niri niri-v3; do
+  if pacman -Q "$pkg" >/dev/null 2>&1; then
+    echo "Removing conflicting package: $pkg"
+    sudo pacman -R --noconfirm "$pkg"
+  fi
+done
 
 TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 
-echo "📥 Downloading (8 connections with aria2)..."
-echo "   $PKG_FILE"
-
+echo "Downloading package..."
 aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
 
-echo "📦 Installing package..."
+echo "Installing package..."
 sudo pacman -U --noconfirm "$PKG_FILE"
 
 cd /
