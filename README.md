@@ -35,7 +35,7 @@ update-niri
 
 ---
 
-## 🧠 What the updater does
+##  What the updater does
 
 - Checks installed version via pacman
 - Fetches latest GitHub release
