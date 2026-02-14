@@ -106,4 +106,3 @@ rm -rf "$TMP_DIR"
 
 echo
 echo "✅ niri-git $LATEST_VERSION installed successfully!"
-
