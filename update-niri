@@ -32,10 +32,6 @@ get_installed_version() {
   pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo ""
 }
 
-supports_avx2() {
-  lscpu 2>/dev/null | grep -qi avx2
-}
-
 INSTALLED_VERSION=$(get_installed_version)
 
 echo "Installed version: ${INSTALLED_VERSION:-Not Installed}"
@@ -46,30 +42,22 @@ RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
 TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
 echo "Latest release: $TAG_NAME"
 
-# Prefer v3 if CPU supports AVX2
-if supports_avx2; then
-  echo "CPU supports AVX2 → selecting x86_64_v3 build"
-  ASSET_PATTERN="^niri-git-.*-x86_64_v3\.pkg\.tar\.zst$"
-else
-  echo "CPU does not support AVX2 → selecting generic x86_64 build"
-  ASSET_PATTERN="^niri-git-.*-x86_64\.pkg\.tar\.zst$"
-fi
-
-ASSET_URL=$(echo "$RELEASE_JSON" | jq -r "
+# Only v3 build
+ASSET_URL=$(echo "$RELEASE_JSON" | jq -r '
   .assets[]
-  | select(.name | test(\"$ASSET_PATTERN\"))
+  | select(.name | contains("x86_64_v3.pkg.tar.zst"))
   | .browser_download_url
-" | head -n1)
+' | head -n1)
 
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ No compatible package found in release."
+  echo "❌ No x86_64_v3 package found in release."
   exit 1
 fi
 
 PKG_FILE=$(basename "$ASSET_URL")
 
 LATEST_VERSION=$(echo "$PKG_FILE" | sed -E \
-  's/^niri-git-(.*)-x86_64(_v3)?\.pkg\.tar\.zst/\1/')
+  's/^niri-git-(.*)-x86_64_v3\.pkg\.tar\.zst/\1/')
 
 echo "Latest package version: $LATEST_VERSION"
 
@@ -118,3 +106,4 @@ rm -rf "$TMP_DIR"
 
 echo
 echo "✅ niri-git $LATEST_VERSION installed successfully!"
+
