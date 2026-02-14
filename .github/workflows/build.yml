@@ -15,9 +15,15 @@ jobs:
       image: archlinux:latest
 
     steps:
+      # -------------------------
+      # Update system
+      # -------------------------
       - name: Update Arch
         run: pacman -Syu --noconfirm
 
+      # -------------------------
+      # Install dependencies
+      # -------------------------
       - name: Install dependencies
         run: |
           pacman -S --noconfirm \
@@ -28,11 +34,17 @@ jobs:
             xdg-desktop-portal-impl \
             clang rust
 
+      # -------------------------
+      # Create builder user
+      # -------------------------
       - name: Create builder user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
+      # -------------------------
+      # Create PKGBUILD
+      # -------------------------
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
@@ -97,21 +109,36 @@ jobs:
 
           chown -R builder:builder /home/builder
 
+      # -------------------------
+      # Build package
+      # -------------------------
       - name: Build package
         run: |
           su builder -c "cd ~ && makepkg -s --noconfirm"
 
+      # -------------------------
+      # Prepare release artifact (rename to x86_64_v3)
+      # -------------------------
       - name: Prepare release
         id: pkg
         run: |
           PKG_PATH=$(ls /home/builder/*.pkg.tar.zst)
           PKG_FILE=$(basename "$PKG_PATH")
 
+          VERSION=$(echo "$PKG_FILE" | sed -E \
+            's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+
           mkdir release
-          cp "$PKG_PATH" "release/$PKG_FILE"
 
-          echo "version=$(echo $PKG_FILE | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')" >> $GITHUB_OUTPUT
+          NEW_FILE="niri-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
+          cp "$PKG_PATH" "release/$NEW_FILE"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      # -------------------------
+      # Create GitHub Release
+      # -------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
