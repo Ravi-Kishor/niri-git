@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- CONFIGURATION ---
 REPO="Ravi-Kishor/niri-git"
 PKG_NAME="niri-git"
-ARCH_PATTERN="x86_64_v3.pkg.tar.zst"
+# Matches the new naming: znver3-thin.pkg.tar.zst
+ARCH_PATTERN="znver3-thin.pkg.tar.zst"
 
 AUTO_YES=false
 FORCE=false
@@ -23,114 +25,123 @@ done
 # -------------------------------
 require() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "❌ Required command '$1' not found"
+    echo "❌ Required command '$1' not found."
     exit 1
   }
 }
 
-for cmd in curl jq pacman sudo aria2c vercmp; do
+for cmd in curl jq pacman sudo aria2c vercmp sed awk; do
   require "$cmd"
 done
 
 # -------------------------------
-# Get Installed Version
+# Version Logic
 # -------------------------------
 get_installed_version() {
-  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || true
+  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo ""
 }
 
 INSTALLED_VERSION="$(get_installed_version)"
 
-echo "Installed version: ${INSTALLED_VERSION:-Not Installed}"
-echo "📡 Fetching latest release..."
+echo "------------------------------------------"
+echo "  Niri-Git Zen 3 (Thin LTO) Installer"
+echo "------------------------------------------"
+echo "Local:   ${INSTALLED_VERSION:-Not Installed}"
+echo "📡 Checking GitHub..."
 
-# -------------------------------
-# Fetch Latest Release
-# -------------------------------
 RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
-
-echo "$RELEASE_JSON" | jq -e . >/dev/null || {
-  echo "❌ Invalid GitHub API response"
-  exit 1
-}
-
 ASSET_URL="$(echo "$RELEASE_JSON" | jq -r \
-  ".assets[] | select(.name | contains(\"$ARCH_PATTERN\")) | .browser_download_url" \
+  ".assets[] | select(.name | contains(\"znver3\")) | .browser_download_url" \
   | head -n1)"
 
 if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ No matching package found in release"
+  echo "❌ Error: No Zen 3 package found in latest release."
   exit 1
 fi
 
 PKG_FILE="$(basename "$ASSET_URL")"
+LATEST_VERSION=$(echo "$PKG_FILE" | sed -E "s/^${PKG_NAME}-(.*)-znver3.*\.pkg\.tar\.zst/\1/")
 
-LATEST_VERSION="$(echo "$PKG_FILE" | sed -E \
-  "s/^${PKG_NAME}-(.*)-${ARCH_PATTERN}/\1/")"
+echo "Remote:  $LATEST_VERSION"
+echo "------------------------------------------"
 
-echo "Latest version: $LATEST_VERSION"
-echo
-
-# -------------------------------
-# Compare Versions
-# -------------------------------
+# Compare
 UP_TO_DATE=false
-if [[ -n "${INSTALLED_VERSION:-}" ]]; then
+if [[ -n "$INSTALLED_VERSION" ]]; then
   if [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
     UP_TO_DATE=true
   fi
 fi
 
 # -------------------------------
-# Interactive Menu
+# Interactive Menu (RESTORED)
 # -------------------------------
-if [[ "$AUTO_YES" = false && "$FORCE" = false ]]; then
+if [[ "$AUTO_YES" == "false" && "$FORCE" == "false" ]]; then
   echo "Choose an action:"
-  echo "1) Update (skip if already latest)"
+  if [[ "$UP_TO_DATE" == "true" ]]; then
+    echo "1) Update (Already latest: $INSTALLED_VERSION)"
+  else
+    echo "1) Update to $LATEST_VERSION"
+  fi
   echo "2) Force reinstall"
   echo "3) Cancel"
   read -rp "Enter choice (1/2/3): " CHOICE
 
   case "$CHOICE" in
-    1) ;;
-    2) FORCE=true ;;
-    *) echo "Cancelled."; exit 0 ;;
+    1) # Standard Update
+        if [[ "$UP_TO_DATE" == "true" ]]; then
+          echo "✅ Already up to date. Use choice '2' to force."
+          exit 0
+        fi
+        ;;
+    2) # Force Reinstall
+        FORCE=true 
+        ;;
+    *) # Cancel
+        echo "Cancelled."; exit 0 
+        ;;
   esac
 fi
 
-if [[ "$UP_TO_DATE" = true && "$FORCE" = false ]]; then
-  echo "✅ Already up to date."
-  exit 0
+# Final check for skip (if not forced)
+if [[ "$UP_TO_DATE" == "true" && "$FORCE" == "false" ]]; then
+    echo "✅ Already up to date."
+    exit 0
 fi
 
-echo "Preparing installation..."
-
 # -------------------------------
-# Remove Conflicting Packages Safely
+# Conflict Removal
 # -------------------------------
-remove_if_installed() {
+remove_conflict() {
   if pacman -Qq "$1" >/dev/null 2>&1; then
-    echo "Removing conflicting package: $1"
-    sudo pacman -Rns --noconfirm "$1" 2>/dev/null || true
+    echo "Removing conflict: $1"
+    sudo pacman -Rns --noconfirm "$1" || true
   fi
 }
 
-remove_if_installed niri
-remove_if_installed niri-v3
+# Cleanup standard niri before installing optimized version
+# We only remove $PKG_NAME if FORCE is true, otherwise we let pacman -U handle the upgrade
+for conflict in niri niri-bin; do
+  remove_conflict "$conflict"
+done
+
+if [[ "$FORCE" == "true" ]]; then
+  remove_conflict "$PKG_NAME"
+fi
 
 # -------------------------------
-# Download + Install
+# Download & Install
 # -------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
 cd "$TMP_DIR"
 
-echo "⬇️ Downloading package..."
-aria2c -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
+echo "⬇️ Downloading: $PKG_FILE"
+aria2c -x 12 -s 12 -j 12 -k 1M "$ASSET_URL"
 
 echo "📦 Installing..."
 sudo pacman -U --noconfirm "$PKG_FILE"
 
-echo
-echo "✅ $PKG_NAME $LATEST_VERSION installed successfully."
+echo "------------------------------------------"
+echo "✅ $PKG_NAME $LATEST_VERSION installed."
+echo "------------------------------------------"
