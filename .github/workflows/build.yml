@@ -22,16 +22,17 @@ jobs:
         run: pacman -Syu --noconfirm
 
       # -------------------------
-      # Install dependencies
+      # Install dependencies (FIXED)
       # -------------------------
       - name: Install dependencies
         run: |
           pacman -S --noconfirm \
-            base-devel git sudo \
-            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon \
+            base-devel git sudo pkgconf \
+            cairo glib2 libdisplay-info libinput libxkbcommon \
             mesa pango pixman seatd systemd-libs \
             wayland wayland-protocols \
             xdg-desktop-portal-impl \
+            pipewire pipewire-audio pipewire-jack \
             clang rust
 
       # -------------------------
@@ -51,7 +52,7 @@ jobs:
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (git, optimized for znver3)"
+          pkgdesc="Scrollable-tiling Wayland compositor (git, znver3 optimized)"
           arch=(x86_64)
           url="https://github.com/YaLTeR/niri"
           license=(GPL-3.0-or-later)
@@ -60,10 +61,10 @@ jobs:
             cairo gcc-libs glib2 glibc
             libdisplay-info libinput libpipewire libxkbcommon
             mesa pango pixman seatd systemd-libs
-            xdg-desktop-portal-impl
+            xdg-desktop-portal-impl pipewire
           )
 
-          makedepends=(clang git rust)
+          makedepends=(clang git rust pkgconf)
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
@@ -88,10 +89,10 @@ jobs:
           build() {
             cd niri
 
-            # Proper Ryzen optimization
+            # Ryzen-specific optimization (REAL performance gain)
             export RUSTFLAGS="-C target-cpu=znver3"
 
-            # Parallel build (important)
+            # Parallel build
             export CARGO_BUILD_JOBS=$(nproc)
 
             cargo build --frozen --release
