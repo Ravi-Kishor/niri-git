@@ -15,15 +15,9 @@ jobs:
       image: archlinux:latest
 
     steps:
-      # -------------------------
-      # Update system
-      # -------------------------
       - name: Update Arch
         run: pacman -Syu --noconfirm
 
-      # -------------------------
-      # Install dependencies (FIXED)
-      # -------------------------
       - name: Install dependencies
         run: |
           pacman -S --noconfirm \
@@ -32,20 +26,14 @@ jobs:
             mesa pango pixman seatd systemd-libs \
             wayland wayland-protocols \
             xdg-desktop-portal-impl \
-            pipewire pipewire-audio pipewire-jack \
-            clang rust
+            pipewire libpipewire \
+            clang llvm rust
 
-      # -------------------------
-      # Create builder user
-      # -------------------------
       - name: Create builder user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-      # -------------------------
-      # Create PKGBUILD
-      # -------------------------
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
@@ -64,7 +52,8 @@ jobs:
             xdg-desktop-portal-impl pipewire
           )
 
-          makedepends=(clang git rust pkgconf)
+          # Clang is critical for libspa-sys/bindgen
+          makedepends=(clang git rust pkgconf llvm)
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
@@ -83,24 +72,23 @@ jobs:
 
           prepare() {
             cd niri
+            # Ensure submodules if any exist
+            git submodule update --init --recursive
             cargo fetch --locked --target "$(rustc --print host-tuple)"
           }
 
           build() {
             cd niri
-
-            # Ryzen-specific optimization (REAL performance gain)
+            
+            # Use flags that won't break internal static linking
             export RUSTFLAGS="-C target-cpu=znver3"
-
-            # Parallel build
-            export CARGO_BUILD_JOBS=$(nproc)
-
+            export LIBCLANG_PATH="/usr/lib"
+            
             cargo build --frozen --release
           }
 
           package() {
             cd niri
-
             install -Dm755 target/release/niri -t "$pkgdir/usr/bin/"
             install -Dm755 resources/niri-session -t "$pkgdir/usr/bin/"
             install -Dm644 resources/niri{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
@@ -109,44 +97,28 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
-
           chown -R builder:builder /home/builder
 
-      # -------------------------
-      # Build package
-      # -------------------------
       - name: Build package
         run: |
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
-            export RUSTFLAGS="-C target-cpu=znver3"
-            export CARGO_BUILD_JOBS=$(nproc)
+            export LIBCLANG_PATH="/usr/lib"
             cd ~ && makepkg -s --noconfirm
           '
 
-      # -------------------------
-      # Prepare release
-      # -------------------------
       - name: Prepare release
         id: pkg
         run: |
           PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
           PKG_FILE=$(basename "$PKG_PATH")
-
-          VERSION=$(echo "$PKG_FILE" | sed -E \
-            's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
-
+          VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
+          
           mkdir -p release
-
           NEW_FILE="niri-git-${VERSION}-x86_64_v3.pkg.tar.zst"
-
           cp "$PKG_PATH" "release/$NEW_FILE"
-
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # -------------------------
-      # Create GitHub Release
-      # -------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
