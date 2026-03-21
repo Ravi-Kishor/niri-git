@@ -1,4 +1,4 @@
-name: Build niri-git (Zen 3 Optimized)
+name: Build niri-git (Zen 3 Optimized + LTO)
 
 permissions:
   contents: write
@@ -15,15 +15,9 @@ jobs:
       image: archlinux:latest
 
     steps:
-      # -------------------------
-      # Update Arch
-      # -------------------------
       - name: Update Arch
         run: pacman -Syu --noconfirm
 
-      # -------------------------
-      # Install dependencies
-      # -------------------------
       - name: Install dependencies
         run: |
           pacman -S --noconfirm \
@@ -34,25 +28,19 @@ jobs:
             pipewire libpipewire \
             clang llvm rust
 
-      # -------------------------
-      # Create builder user
-      # -------------------------
       - name: Create builder user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           chown -R builder:builder /home/builder
 
-      # -------------------------
-      # Create PKGBUILD
-      # -------------------------
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 optimized)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 Optimized + LTO)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
@@ -62,13 +50,14 @@ jobs:
             mesa pango pixman seatd systemd-libs pipewire
           )
 
-          makedepends=(clang llvm rust git pkgconf)
+          # Critical: libpipewire must be here for LTO linking
+          makedepends=(clang llvm rust git pkgconf libpipewire)
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          # Keep LTO for real performance
-          options=(!debug)
+          # ENABLING LTO HERE
+          options=(lto !debug)
 
           source=("niri::git+$url.git")
           b2sums=('SKIP')
@@ -77,41 +66,36 @@ jobs:
             cd niri
             git describe --long --tags --abbrev=7 2>/dev/null | \
               sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^v//' || \
-            printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
           }
 
           prepare() {
             cd niri
-            cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+            cargo fetch --locked
           }
 
           build() {
             cd niri
-
-            # -------- Zen 3 CPU tuning --------
-            export RUSTFLAGS="-C target-cpu=znver3 -C link-arg=-Wl,-O1"
-
-            # -------- REAL Rust optimization --------
-            export CARGO_PROFILE_RELEASE_LTO=true
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-            export CARGO_PROFILE_RELEASE_PANIC=abort
-
-            # -------- Fix bindgen / pipewire issues --------
+            
+            # --- PEAK PERFORMANCE FLAGS ---
+            # linker-plugin-lto: Allows Clang and Rust to share LTO info
+            # codegen-units=1: Max optimization (required for best LTO)
+            export RUSTFLAGS="-C target-cpu=znver3 -C linker-plugin-lto -C codegen-units=1 -C strip=symbols"
+            
+            # --- LINKING FIXES ---
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-
-            # -------- Toolchain --------
+            
             export CC=gcc
             export CXX=g++
 
             export CARGO_TARGET_DIR=target
-
-            cargo build --frozen --release --target x86_64-unknown-linux-gnu
+            cargo build --frozen --release
           }
 
           package() {
             cd niri
-            install -Dm755 target/x86_64-unknown-linux-gnu/release/niri -t "$pkgdir/usr/bin/"
+            install -Dm755 target/release/niri -t "$pkgdir/usr/bin/"
             install -Dm755 resources/niri-session -t "$pkgdir/usr/bin/"
             install -Dm644 resources/niri{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
             install -Dm644 resources/niri.desktop -t "$pkgdir/usr/share/wayland-sessions/"
@@ -119,12 +103,8 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
-
           chown builder:builder /home/builder/PKGBUILD
 
-      # -------------------------
-      # Build package
-      # -------------------------
       - name: Build package
         run: |
           su builder -c '
@@ -132,9 +112,6 @@ jobs:
             cd ~ && makepkg -s --noconfirm
           '
 
-      # -------------------------
-      # Prepare release
-      # -------------------------
       - name: Prepare release
         id: pkg
         run: |
@@ -143,18 +120,15 @@ jobs:
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           
           mkdir -p release
-          NEW_FILE="niri-git-${VERSION}-znver3.pkg.tar.zst"
+          NEW_FILE="niri-git-${VERSION}-znver3-lto.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      # -------------------------
-      # Create GitHub Release
-      # -------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-znver3
-          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 Optimized)
+          tag_name: ${{ steps.pkg.outputs.version }}-znver3-lto
+          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 + LTO)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
