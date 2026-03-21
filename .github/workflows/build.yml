@@ -1,4 +1,4 @@
-name: Build niri-git (Zen 3 Optimized + LTO)
+name: Build niri-git (Zen 3 Optimized + Thin LTO)
 
 permissions:
   contents: write
@@ -40,7 +40,7 @@ jobs:
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 Optimized + LTO)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 + Thin LTO)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
@@ -50,14 +50,13 @@ jobs:
             mesa pango pixman seatd systemd-libs pipewire
           )
 
-          # Critical: libpipewire must be here for LTO linking
           makedepends=(clang llvm rust git pkgconf libpipewire)
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          # ENABLING LTO HERE
-          options=(lto !debug)
+          # Disable Arch's default LTO to let Cargo's Thin LTO handle it
+          options=(!lto !debug)
 
           source=("niri::git+$url.git")
           b2sums=('SKIP')
@@ -76,20 +75,25 @@ jobs:
 
           build() {
             cd niri
-            
-            # --- PEAK PERFORMANCE FLAGS ---
-            # linker-plugin-lto: Allows Clang and Rust to share LTO info
-            # codegen-units=1: Max optimization (required for best LTO)
-            export RUSTFLAGS="-C target-cpu=znver3 -C linker-plugin-lto -C codegen-units=1 -C strip=symbols"
-            
-            # --- LINKING FIXES ---
+
+            # 1. Hardware Optimization (Zen 3)
+            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols"
+
+            # 2. Performance (Thin LTO)
+            # Thin LTO is faster to compile and uses less RAM than Fat LTO
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+            export CARGO_PROFILE_RELEASE_PANIC=abort
+
+            # 3. Linker & Bindgen Fixes
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-            
+
+            # 4. Toolchain
             export CC=gcc
             export CXX=g++
-
             export CARGO_TARGET_DIR=target
+
             cargo build --frozen --release
           }
 
@@ -120,15 +124,15 @@ jobs:
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           
           mkdir -p release
-          NEW_FILE="niri-git-${VERSION}-znver3-lto.pkg.tar.zst"
+          NEW_FILE="niri-git-${VERSION}-znver3-thin.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-znver3-lto
-          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 + LTO)
+          tag_name: ${{ steps.pkg.outputs.version }}-znver3-thin
+          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 + Thin LTO)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
