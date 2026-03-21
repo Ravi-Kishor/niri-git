@@ -1,4 +1,4 @@
-name: Build niri-git (x86-64-v3)
+name: Build niri-git (Zen 3 Optimized)
 
 permissions:
   contents: write
@@ -40,7 +40,7 @@ jobs:
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (git, znver3 optimized)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 Optimized)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
@@ -55,8 +55,9 @@ jobs:
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          # Added !lto per your request
-          options=(!lto !debug !strip)
+          # Stability over tiny gains: !lto avoids complex linking errors
+          # !debug avoids massive external debug symbol packages
+          options=(!lto !debug)
 
           source=("niri::git+$url.git")
           b2sums=('SKIP')
@@ -76,12 +77,17 @@ jobs:
           build() {
             cd niri
             
-            # Optimization and Fixes
-            export RUSTFLAGS="-C target-cpu=znver3"
+            # --- PERFORMANCE & SIZE ---
+            # target-cpu=znver3: Full Zen 3 instruction set (AVX2, BMI2, etc.)
+            # strip=symbols: Removes debug bloat at compile-time for a tiny binary
+            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols"
+            
+            # --- LINKING FIXES (CRITICAL) ---
+            # These solve the 'undefined symbol: ..._libspa_rs' errors
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
             
-            # Force standard Arch compiler names
+            # Force standard Arch toolchain naming
             export CC=gcc
             export CXX=g++
 
@@ -111,11 +117,13 @@ jobs:
       - name: Prepare release
         id: pkg
         run: |
+          # Find the actual generated package
           PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst")
           PKG_FILE=$(basename "$PKG_PATH")
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           
           mkdir -p release
+          # Renaming to reflect the optimization level
           NEW_FILE="niri-git-${VERSION}-znver3.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -124,7 +132,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-znver3
-          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3)
+          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 Optimized)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
