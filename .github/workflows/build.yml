@@ -51,7 +51,7 @@ jobs:
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (git, x86-64-v3)"
+          pkgdesc="Scrollable-tiling Wayland compositor (git, optimized for znver3)"
           arch=(x86_64)
           url="https://github.com/YaLTeR/niri"
           license=(GPL-3.0-or-later)
@@ -88,9 +88,11 @@ jobs:
           build() {
             cd niri
 
-            export RUSTFLAGS="-C target-cpu=x86-64-v3"
-            export CFLAGS+=" -march=x86-64-v3 -ffat-lto-objects"
-            export CXXFLAGS+=" -march=x86-64-v3"
+            # Proper Ryzen optimization
+            export RUSTFLAGS="-C target-cpu=znver3"
+
+            # Parallel build (important)
+            export CARGO_BUILD_JOBS=$(nproc)
 
             cargo build --frozen --release
           }
@@ -114,21 +116,26 @@ jobs:
       # -------------------------
       - name: Build package
         run: |
-          su builder -c "cd ~ && makepkg -s --noconfirm"
+          su builder -c '
+            export MAKEFLAGS="-j$(nproc)"
+            export RUSTFLAGS="-C target-cpu=znver3"
+            export CARGO_BUILD_JOBS=$(nproc)
+            cd ~ && makepkg -s --noconfirm
+          '
 
       # -------------------------
-      # Prepare release artifact (rename to x86_64_v3)
+      # Prepare release
       # -------------------------
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(ls /home/builder/*.pkg.tar.zst)
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
           PKG_FILE=$(basename "$PKG_PATH")
 
           VERSION=$(echo "$PKG_FILE" | sed -E \
             's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
 
-          mkdir release
+          mkdir -p release
 
           NEW_FILE="niri-git-${VERSION}-x86_64_v3.pkg.tar.zst"
 
