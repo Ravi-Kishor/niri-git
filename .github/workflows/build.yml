@@ -25,7 +25,6 @@ jobs:
             cairo glib2 libdisplay-info libinput libxkbcommon \
             mesa pango pixman seatd systemd-libs \
             wayland wayland-protocols \
-            xdg-desktop-portal-impl \
             pipewire libpipewire \
             clang llvm rust
 
@@ -33,6 +32,7 @@ jobs:
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          chown -R builder:builder /home/builder
 
       - name: Create PKGBUILD
         run: |
@@ -42,23 +42,21 @@ jobs:
           pkgrel=1
           pkgdesc="Scrollable-tiling Wayland compositor (git, znver3 optimized)"
           arch=(x86_64)
-          url="https://github.com/YaLTeR/niri"
+          url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
 
           depends=(
-            cairo gcc-libs glib2 glibc
-            libdisplay-info libinput libpipewire libxkbcommon
-            mesa pango pixman seatd systemd-libs
-            xdg-desktop-portal-impl pipewire
+            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon 
+            mesa pango pixman seatd systemd-libs pipewire
           )
 
-          # Clang is critical for libspa-sys/bindgen
-          makedepends=(clang git rust pkgconf llvm)
+          makedepends=(clang llvm rust git pkgconf)
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          options=(lto !debug)
+          # Added !lto per your request
+          options=(!lto !debug !strip)
 
           source=("niri::git+$url.git")
           b2sums=('SKIP')
@@ -72,18 +70,22 @@ jobs:
 
           prepare() {
             cd niri
-            # Ensure submodules if any exist
-            git submodule update --init --recursive
-            cargo fetch --locked --target "$(rustc --print host-tuple)"
+            cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
           }
 
           build() {
             cd niri
             
-            # Use flags that won't break internal static linking
+            # Optimization and Fixes
             export RUSTFLAGS="-C target-cpu=znver3"
             export LIBCLANG_PATH="/usr/lib"
+            export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
             
+            # Force standard Arch compiler names
+            export CC=gcc
+            export CXX=g++
+
+            export CARGO_TARGET_DIR=target
             cargo build --frozen --release
           }
 
@@ -97,33 +99,32 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
-          chown -R builder:builder /home/builder
+          chown builder:builder /home/builder/PKGBUILD
 
       - name: Build package
         run: |
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
-            export LIBCLANG_PATH="/usr/lib"
             cd ~ && makepkg -s --noconfirm
           '
 
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst" ! -name "*debug*")
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst")
           PKG_FILE=$(basename "$PKG_PATH")
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           
           mkdir -p release
-          NEW_FILE="niri-git-${VERSION}-x86_64_v3.pkg.tar.zst"
+          NEW_FILE="niri-git-${VERSION}-znver3.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-v3
-          name: niri-git ${{ steps.pkg.outputs.version }} (x86-64-v3)
+          tag_name: ${{ steps.pkg.outputs.version }}-znver3
+          name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3)
           files: release/*.pkg.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
