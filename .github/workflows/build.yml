@@ -15,9 +15,15 @@ jobs:
       image: archlinux:latest
 
     steps:
+      # -------------------------
+      # Update Arch
+      # -------------------------
       - name: Update Arch
         run: pacman -Syu --noconfirm
 
+      # -------------------------
+      # Install dependencies
+      # -------------------------
       - name: Install dependencies
         run: |
           pacman -S --noconfirm \
@@ -28,19 +34,25 @@ jobs:
             pipewire libpipewire \
             clang llvm rust
 
+      # -------------------------
+      # Create builder user
+      # -------------------------
       - name: Create builder user
         run: |
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           chown -R builder:builder /home/builder
 
+      # -------------------------
+      # Create PKGBUILD
+      # -------------------------
       - name: Create PKGBUILD
         run: |
           cat > /home/builder/PKGBUILD << 'EOF'
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 Optimized)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 optimized)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
@@ -55,9 +67,8 @@ jobs:
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          # Stability over tiny gains: !lto avoids complex linking errors
-          # !debug avoids massive external debug symbol packages
-          options=(!lto !debug)
+          # Keep LTO for real performance
+          options=(!debug)
 
           source=("niri::git+$url.git")
           b2sums=('SKIP')
@@ -76,28 +87,31 @@ jobs:
 
           build() {
             cd niri
-            
-            # --- PERFORMANCE & SIZE ---
-            # target-cpu=znver3: Full Zen 3 instruction set (AVX2, BMI2, etc.)
-            # strip=symbols: Removes debug bloat at compile-time for a tiny binary
-            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols"
-            
-            # --- LINKING FIXES (CRITICAL) ---
-            # These solve the 'undefined symbol: ..._libspa_rs' errors
+
+            # -------- Zen 3 CPU tuning --------
+            export RUSTFLAGS="-C target-cpu=znver3 -C link-arg=-Wl,-O1"
+
+            # -------- REAL Rust optimization --------
+            export CARGO_PROFILE_RELEASE_LTO=true
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+            export CARGO_PROFILE_RELEASE_PANIC=abort
+
+            # -------- Fix bindgen / pipewire issues --------
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-            
-            # Force standard Arch toolchain naming
+
+            # -------- Toolchain --------
             export CC=gcc
             export CXX=g++
 
             export CARGO_TARGET_DIR=target
-            cargo build --frozen --release
+
+            cargo build --frozen --release --target x86_64-unknown-linux-gnu
           }
 
           package() {
             cd niri
-            install -Dm755 target/release/niri -t "$pkgdir/usr/bin/"
+            install -Dm755 target/x86_64-unknown-linux-gnu/release/niri -t "$pkgdir/usr/bin/"
             install -Dm755 resources/niri-session -t "$pkgdir/usr/bin/"
             install -Dm644 resources/niri{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
             install -Dm644 resources/niri.desktop -t "$pkgdir/usr/share/wayland-sessions/"
@@ -105,8 +119,12 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
+
           chown builder:builder /home/builder/PKGBUILD
 
+      # -------------------------
+      # Build package
+      # -------------------------
       - name: Build package
         run: |
           su builder -c '
@@ -114,20 +132,24 @@ jobs:
             cd ~ && makepkg -s --noconfirm
           '
 
+      # -------------------------
+      # Prepare release
+      # -------------------------
       - name: Prepare release
         id: pkg
         run: |
-          # Find the actual generated package
           PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst")
           PKG_FILE=$(basename "$PKG_PATH")
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
           
           mkdir -p release
-          # Renaming to reflect the optimization level
           NEW_FILE="niri-git-${VERSION}-znver3.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
+      # -------------------------
+      # Create GitHub Release
+      # -------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
