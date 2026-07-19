@@ -42,13 +42,13 @@ jobs:
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 + Thin LTO)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen3 + Thin LTO)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
 
           depends=(
-            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon 
+            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon
             mesa pango pixman seatd systemd-libs pipewire
           )
 
@@ -80,7 +80,11 @@ jobs:
             export CC=clang
             export CXX=clang++
 
-            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols -C link-arg=-fuse-ld=lld"
+            export CFLAGS="-O3 -pipe -march=znver3 -mtune=znver3"
+            export CXXFLAGS="$CFLAGS"
+            export LDFLAGS="-Wl,-O1,--as-needed"
+
+            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols -C embed-bitcode=no -C link-arg=-fuse-ld=lld"
 
             export CARGO_PROFILE_RELEASE_LTO=thin
             export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -89,10 +93,9 @@ jobs:
 
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-
             export CARGO_TARGET_DIR=target
 
-            cargo build --frozen --release
+            cargo build --release --frozen -j "$(nproc)"
           }
 
           package() {
@@ -111,7 +114,8 @@ jobs:
         run: |
           su builder -c '
             export MAKEFLAGS="-j$(nproc)"
-            cd ~ && makepkg -s --noconfirm --needed
+            cd ~
+            makepkg -s --noconfirm --needed
           '
 
       - name: Prepare release
@@ -124,7 +128,7 @@ jobs:
           mkdir -p release
           cp "$PKG_PATH" "release/$PKG_FILE"
 
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
