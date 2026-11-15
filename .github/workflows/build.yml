@@ -4,135 +4,251 @@ permissions:
   contents: write
 
 on:
-  #workflow_dispatch:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if a release for the current upstream commit exists"
+        type: boolean
+        default: false
   #schedule:
-    #- cron: "0 */12 * * *"
+  #  - cron: "0 */12 * * *"
+
+concurrency:
+  group: niri-git-znver3-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/niri-wm/niri.git
 
 jobs:
+  check:
+    name: Resolve upstream and skip if already released
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      short: ${{ steps.resolve.outputs.short }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Resolve upstream HEAD and check for existing release
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          COMMIT="$(git ls-remote "$UPSTREAM_REPO" HEAD | awk '{print $1}')"
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ERROR: could not resolve upstream HEAD"
+            exit 1
+          }
+
+          SHORT="${COMMIT:0:7}"
+          SKIP=false
+
+          if [[ "$FORCE" != "true" ]] && \
+             gh release list --repo "$GITHUB_REPOSITORY" --limit 20 --json tagName -q '.[].tagName' \
+             | grep -q "${SHORT}-znver3-thin"; then
+            SKIP=true
+          fi
+
+          {
+            echo "commit=$COMMIT"
+            echo "short=$SHORT"
+            echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream: $COMMIT ($SHORT) | Skip: $SKIP"
+
   build:
+    name: Build niri-git (znver3-thin)
+    needs: check
+    if: needs.check.outputs.skip != 'true'
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+    env:
+      UPSTREAM_COMMIT: ${{ needs.check.outputs.commit }}
 
     steps:
-      - name: Update Arch
-        run: pacman -Syu --noconfirm
-
-      - name: Install dependencies
+      - name: Update Arch and install dependencies
+        shell: bash
         run: |
-          pacman -S --noconfirm \
-            base-devel git sudo pkgconf \
+          set -euo pipefail
+          pacman -Syu --noconfirm --noprogressbar
+          pacman -S --noconfirm --needed --noprogressbar \
+            base-devel git pkgconf zstd mold sccache \
             cairo glib2 libdisplay-info libinput libxkbcommon \
             mesa pango pixman seatd systemd-libs \
             wayland wayland-protocols \
             pipewire libpipewire \
             clang llvm rust
 
-      - name: Create builder user
-        run: |
           useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-          chown -R builder:builder /home/builder
+          install -d -o builder -g builder \
+            /home/builder/niri-build \
+            /home/builder/.cargo/registry \
+            /home/builder/.cargo/git \
+            /home/builder/.cache/sccache
 
-      - name: Create PKGBUILD
+      - name: Cache Cargo registry and sccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry/index
+            /home/builder/.cargo/registry/cache
+            /home/builder/.cargo/git/db
+            /home/builder/.cache/sccache
+          key: niri-rust-znver3-${{ needs.check.outputs.commit }}
+          restore-keys: |
+            niri-rust-znver3-
+
+      - name: Pre-clone upstream and create PKGBUILD
+        shell: bash
         run: |
-          cat > /home/builder/PKGBUILD << 'EOF'
+          set -euo pipefail
+
+          # Shallow blobless clone pinned to resolved upstream commit
+          git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" /home/builder/niri-build/src/niri
+          git -C /home/builder/niri-build/src/niri checkout --detach "$UPSTREAM_COMMIT"
+
+          cat > /home/builder/niri-build/PKGBUILD << 'EOF'
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 + Thin LTO)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen 3 5600GT + Thin LTO)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
 
           depends=(
-            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon 
+            cairo glib2 libdisplay-info libinput libpipewire libxkbcommon
             mesa pango pixman seatd systemd-libs pipewire
           )
-
-          makedepends=(clang llvm rust git pkgconf libpipewire)
+          makedepends=(clang llvm rust git pkgconf libpipewire mold sccache)
+          optdepends=(
+            'dux-shell: Wayland desktop shell'
+            'xwayland-satellite: rootless XWayland integration'
+            'xdg-desktop-portal-gnome: screencasting support'
+            'xdg-desktop-portal-gtk: file picker and portal support'
+          )
 
           provides=(niri wayland-compositor)
           conflicts=(niri niri-bin)
 
-          # Disable Arch's default LTO to let Cargo's Thin LTO handle it
+          # Disable Arch's default LTO to let Cargo's Thin LTO handle it cleanly
           options=(!lto !debug)
 
-          source=("niri::git+$url.git")
-          b2sums=('SKIP')
-
           pkgver() {
-            cd niri
+            cd "$srcdir/niri"
             git describe --long --tags --abbrev=7 2>/dev/null | \
               sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^v//' || \
-              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
           }
 
           prepare() {
-            cd niri
-            cargo fetch --locked
+            cd "$srcdir/niri"
+            export CARGO_HOME="/home/builder/.cargo"
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
           }
 
           build() {
-            cd niri
+            cd "$srcdir/niri"
 
-            # 1. Hardware Optimization (Zen 3)
-            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols"
+            export CARGO_HOME="/home/builder/.cargo"
+            export RUSTC_WRAPPER="sccache"
+            export SCCACHE_DIR="/home/builder/.cache/sccache"
+            export SCCACHE_CACHE_SIZE="2G"
 
-            # 2. Performance (Thin LTO)
-            # Thin LTO is faster to compile and uses less RAM than Fat LTO
-            export CARGO_PROFILE_RELEASE_LTO=thin
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-            export CARGO_PROFILE_RELEASE_PANIC=abort
-
-            # 3. Linker & Bindgen Fixes
-            export LIBCLANG_PATH="/usr/lib"
-            export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-
-            # 4. Toolchain
+            # 1. C/C++ bindings optimization for Ryzen 5600GT (libspa / pipewire shims)
             export CC=gcc
             export CXX=g++
+            export CFLAGS="-O3 -g0 -pipe -march=znver3 -mtune=znver3 -fno-plt"
+            export CXXFLAGS="$CFLAGS"
+
+            # 2. Rust Hardware Optimization (Zen 3 + mold linker + RELR packed relocations)
+            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols -C link-arg=-fuse-ld=mold -C link-arg=-Wl,-O1 -C link-arg=-Wl,--as-needed -C link-arg=-Wl,-z,pack-relative-relocs"
+
+            # 3. Thin LTO + Abort on panic (smaller binary, better L3 cache locality on 5600GT)
+            export CARGO_PROFILE_RELEASE_LTO=thin
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+            export CARGO_PROFILE_RELEASE_PANIC=abort
+            export CARGO_PROFILE_RELEASE_INCREMENTAL=false
+
+            # 4. Bindgen / PipeWire Fixes
+            export LIBCLANG_PATH="/usr/lib"
+            export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
             export CARGO_TARGET_DIR=target
 
             cargo build --frozen --release
           }
 
           package() {
-            cd niri
+            cd "$srcdir/niri"
             install -Dm755 target/release/niri -t "$pkgdir/usr/bin/"
             install -Dm755 resources/niri-session -t "$pkgdir/usr/bin/"
             install -Dm644 resources/niri{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
             install -Dm644 resources/niri.desktop -t "$pkgdir/usr/share/wayland-sessions/"
             install -Dm644 resources/niri-portals.conf -t "$pkgdir/usr/share/xdg-desktop-portal/"
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
+
+            # Generate shell completions directly from the built binary
+            install -d "$pkgdir/usr/share/bash-completion/completions" \
+              "$pkgdir/usr/share/zsh/site-functions" \
+              "$pkgdir/usr/share/fish/vendor_completions.d"
+
+            ./target/release/niri completions bash > "$pkgdir/usr/share/bash-completion/completions/niri"
+            ./target/release/niri completions zsh  > "$pkgdir/usr/share/zsh/site-functions/_niri"
+            ./target/release/niri completions fish > "$pkgdir/usr/share/fish/vendor_completions.d/niri.fish"
           }
           EOF
-          chown builder:builder /home/builder/PKGBUILD
+
+          chown -R builder:builder /home/builder
 
       - name: Build package
+        shell: bash
         run: |
-          su builder -c '
+          set -euo pipefail
+          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
+
+          su builder -s /bin/bash -c '
+            set -euo pipefail
+            export PACKAGER="Ravi Kishor <github@ravi>"
             export MAKEFLAGS="-j$(nproc)"
-            cd ~ && makepkg -s --noconfirm
+            cd /home/builder/niri-build
+            makepkg --nodeps --noextract --clean --noconfirm
+            sccache --show-stats || true
           '
 
       - name: Prepare release
         id: pkg
+        shell: bash
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst")
-          PKG_FILE=$(basename "$PKG_PATH")
-          VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
-          
+          set -euo pipefail
+          PKG_PATH="$(find /home/builder/niri-build -maxdepth 1 -type f -name 'niri-git-*-x86_64.pkg.tar.zst' -print -quit)"
+          [[ -n "$PKG_PATH" ]] || { echo "ERROR: Built package not found"; exit 1; }
+
+          PKG_FILE="$(basename "$PKG_PATH")"
+          VERSION="$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')"
+
           mkdir -p release
           NEW_FILE="niri-git-${VERSION}-znver3-thin.pkg.tar.zst"
           cp "$PKG_PATH" "release/$NEW_FILE"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          sha256sum "release/$NEW_FILE" > "release/${NEW_FILE}.sha256"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh release/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.version }}-znver3-thin
           name: niri-git ${{ steps.pkg.outputs.version }} (Zen 3 + Thin LTO)
-          files: release/*.pkg.tar.zst
+          files: |
+            release/*.pkg.tar.zst
+            release/*.sha256
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
