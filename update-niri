@@ -14,6 +14,10 @@ for arg in "$@"; do
   case "$arg" in
     -y|--yes) AUTO_YES=true ;;
     -f|--force) FORCE=true ;;
+    -h|--help)
+      echo "Usage: $(basename "$0") [-y|--yes] [-f|--force]"
+      exit 0
+      ;;
   esac
 done
 
@@ -22,23 +26,19 @@ done
 # -------------------------------
 require() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "❌ Missing: $1"
+    echo "❌ Missing dependency: $1"
     exit 1
   }
 }
 
-for cmd in curl jq pacman sudo aria2c vercmp sed awk; do
+for cmd in curl jq pacman sudo aria2c vercmp sha256sum; do
   require "$cmd"
 done
 
 # -------------------------------
-# Version
+# Version Check
 # -------------------------------
-get_installed_version() {
-  pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || echo ""
-}
-
-INSTALLED_VERSION="$(get_installed_version)"
+INSTALLED_VERSION="$(pacman -Q "$PKG_NAME" 2>/dev/null | awk '{print $2}' || true)"
 
 echo "------------------------------------------"
 echo "  Niri Installer (Zen3 build)"
@@ -46,38 +46,42 @@ echo "------------------------------------------"
 echo "Local:   ${INSTALLED_VERSION:-Not Installed}"
 echo "📡 Fetching latest release..."
 
-RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")"
+RELEASE_JSON="$(curl -fsSL \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/$REPO/releases/latest")"
 
-# ✅ Correct asset match (real output)
-ASSET_URL="$(echo "$RELEASE_JSON" | jq -r '
-  .assets[]
-  | select(.name | test("^niri-git-.*-x86_64\\.pkg\\.tar\\.zst$"))
-  | .browser_download_url
-' | head -n1)"
+# Exclude -debug split packages and select the main x86_64/znver3 package
+ASSET_JSON="$(jq -c '
+  [ .assets[]
+    | select(.name | test("^niri-git-(?!debug-).*-(x86_64|znver3)\\.pkg\\.tar\\.zst$"))
+  ] | first // empty
+' <<< "$RELEASE_JSON")"
 
-if [[ -z "$ASSET_URL" || "$ASSET_URL" == "null" ]]; then
-  echo "❌ No package found in release."
+if [[ -z "$ASSET_JSON" ]]; then
+  echo "❌ No matching package found in latest release."
   exit 1
 fi
 
-PKG_FILE="$(basename "$ASSET_URL")"
+ASSET_URL="$(jq -r '.browser_download_url' <<< "$ASSET_JSON")"
+PKG_FILE="$(jq -r '.name' <<< "$ASSET_JSON")"
+EXPECTED_SHA256="$(jq -r '.digest // empty' <<< "$ASSET_JSON" | sed 's/^sha256://')"
 
-# Clean version extraction
-LATEST_VERSION="$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')"
+# Extract version cleanly in pure bash
+LATEST_VERSION="${PKG_FILE#niri-git-}"
+LATEST_VERSION="${LATEST_VERSION%-x86_64.pkg.tar.zst}"
+LATEST_VERSION="${LATEST_VERSION%-znver3.pkg.tar.zst}"
 
 echo "Remote:  $LATEST_VERSION"
 echo "------------------------------------------"
 
 # Compare versions
 UP_TO_DATE=false
-if [[ -n "$INSTALLED_VERSION" ]]; then
-  if [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
-    UP_TO_DATE=true
-  fi
+if [[ -n "$INSTALLED_VERSION" ]] && [[ "$(vercmp "$INSTALLED_VERSION" "$LATEST_VERSION")" -ge 0 ]]; then
+  UP_TO_DATE=true
 fi
 
 # -------------------------------
-# Menu
+# Interactive Menu
 # -------------------------------
 if [[ "$AUTO_YES" == "false" && "$FORCE" == "false" ]]; then
   echo "Choose an action:"
@@ -108,34 +112,38 @@ if [[ "$UP_TO_DATE" == "true" && "$FORCE" == "false" ]]; then
   exit 0
 fi
 
-# -------------------------------
-# Conflict handling
-# -------------------------------
-remove_if_installed() {
-  pacman -Qq "$1" &>/dev/null && sudo pacman -Rns --noconfirm "$1" || true
-}
-
-# Remove official versions only
-for pkg in niri niri-bin; do
-  remove_if_installed "$pkg"
-done
-
-# Only remove self if forcing
-if [[ "$FORCE" == "true" ]]; then
-  remove_if_installed "$PKG_NAME"
-fi
+# Authenticate sudo once upfront
+sudo -v
 
 # -------------------------------
-# Download & install
+# Download & Verify
 # -------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 cd "$TMP_DIR"
 
-echo "⬇️ Downloading..."
-aria2c -x 12 -s 12 -k 1M "$ASSET_URL"
+echo "⬇️ Downloading $PKG_FILE..."
+aria2c -q --show-console-readout=true -x 8 -s 8 -k 1M -o "$PKG_FILE" "$ASSET_URL"
 
+if [[ -n "$EXPECTED_SHA256" ]]; then
+  echo "🔒 Verifying SHA-256 checksum..."
+  echo "$EXPECTED_SHA256  $PKG_FILE" | sha256sum -c --status || {
+    echo "❌ Checksum verification failed! Aborting install."
+    exit 1
+  }
+fi
+
+# -------------------------------
+# Atomic Install / Conflict Swap
+# -------------------------------
 echo "📦 Installing..."
+# Check exact package name (avoids matching niri-git via provides=('niri'))
+for conflict in niri niri-bin; do
+  if [[ "$(pacman -Q "$conflict" 2>/dev/null | awk '{print $1}')" == "$conflict" ]]; then
+    sudo pacman -Rd --nodeps --noconfirm "$conflict"
+  fi
+done
+
 sudo pacman -U --noconfirm "$PKG_FILE"
 
 echo "------------------------------------------"
