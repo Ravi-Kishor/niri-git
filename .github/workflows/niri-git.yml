@@ -15,14 +15,11 @@ jobs:
       image: archlinux:latest
 
     steps:
-      - name: Init pacman + update
+      - name: Update system and install dependencies
         run: |
-          pacman-key --init
-          pacman -Syu --noconfirm
-
-      - name: Install dependencies
-        run: |
-          pacman -S --noconfirm \
+          set -euo pipefail
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm --needed \
             base-devel git sudo pkgconf \
             cairo glib2 libdisplay-info libinput libxkbcommon \
             mesa pango pixman seatd systemd-libs \
@@ -32,9 +29,23 @@ jobs:
 
       - name: Create builder user
         run: |
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          set -euo pipefail
+          useradd -m -s /bin/bash builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          mkdir -p /home/builder/.cargo /home/builder/cargo-target
           chown -R builder:builder /home/builder
+
+      - name: Cache Cargo registry and target directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/builder/.cargo/registry
+            /home/builder/.cargo/git
+            /home/builder/cargo-target
+          key: cargo-zen3-thinlto-${{ runner.os }}-v1
+          restore-keys: |
+            cargo-zen3-thinlto-${{ runner.os }}-
 
       - name: Create PKGBUILD
         run: |
@@ -82,9 +93,9 @@ jobs:
 
             export CFLAGS="-O3 -pipe -march=znver3 -mtune=znver3"
             export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O1,--as-needed"
+            export LDFLAGS="-Wl,-O2,--as-needed"
 
-            export RUSTFLAGS="-C target-cpu=znver3 -C strip=symbols -C link-arg=-fuse-ld=lld"
+            export RUSTFLAGS="-C target-cpu=znver3 -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed"
 
             export CARGO_PROFILE_RELEASE_LTO=thin
             export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
@@ -93,14 +104,15 @@ jobs:
 
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
-            export CARGO_TARGET_DIR=target
+            export CARGO_TARGET_DIR="/home/builder/cargo-target"
 
-            cargo build --release --frozen -j "$(nproc)"
+            cargo build --release --frozen -j "${CARGO_BUILD_JOBS:-$(nproc)}"
           }
 
           package() {
             cd niri
-            install -Dm755 target/release/niri -t "$pkgdir/usr/bin/"
+            local target_dir="/home/builder/cargo-target/release"
+            install -Dm755 "$target_dir/niri" -t "$pkgdir/usr/bin/"
             install -Dm755 resources/niri-session -t "$pkgdir/usr/bin/"
             install -Dm644 resources/niri{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
             install -Dm644 resources/niri.desktop -t "$pkgdir/usr/share/wayland-sessions/"
@@ -112,16 +124,20 @@ jobs:
 
       - name: Build package
         run: |
-          su builder -c '
+          set -euo pipefail
+          su - builder -c '
             export MAKEFLAGS="-j$(nproc)"
+            export CARGO_BUILD_JOBS="$(nproc)"
             cd ~
-            makepkg -s --noconfirm --needed
+            makepkg --noconfirm --needed
           '
 
       - name: Prepare release
         id: pkg
         run: |
-          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst")
+          set -euo pipefail
+          PKG_PATH=$(find /home/builder -maxdepth 1 -type f -name "niri-git-*-x86_64.pkg.tar.zst" | head -n 1)
+          test -n "$PKG_PATH"
           PKG_FILE=$(basename "$PKG_PATH")
           VERSION=$(echo "$PKG_FILE" | sed -E 's/^niri-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')
 
@@ -129,18 +145,34 @@ jobs:
           cp "$PKG_PATH" "release/$PKG_FILE"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION}-zen3" >> "$GITHUB_OUTPUT"
+
+      - name: Check if release tag already exists
+        id: check_release
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.pkg.outputs.tag }}")
+          if [ "$STATUS" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: niri-zen3
+          name: niri-zen3-${{ steps.pkg.outputs.version }}
           path: release/*.pkg.tar.zst
 
       - name: Create GitHub Release
+        if: steps.check_release.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.pkg.outputs.version }}-zen3
+          tag_name: ${{ steps.pkg.outputs.tag }}
           name: niri-git ${{ steps.pkg.outputs.version }} (Zen3 + Thin LTO)
           files: release/*.pkg.tar.zst
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
