@@ -69,16 +69,15 @@ jobs:
             /home/builder/.cargo/registry
             /home/builder/.cargo/git
             /home/builder/cargo-target
-          key: cargo-zen3-fatlto-${{ runner.os }}-${{ steps.check.outputs.sha }}
+          key: cargo-zen3-fatlto-o2-${{ runner.os }}-${{ steps.check.outputs.sha }}
           restore-keys: |
-            cargo-zen3-fatlto-${{ runner.os }}-
+            cargo-zen3-fatlto-o2-${{ runner.os }}-
 
       - name: Configure makepkg and create PKGBUILD
         if: steps.check.outputs.skip != 'true'
         run: |
           set -euo pipefail
 
-          # Apply makepkg overrides properly (COMPRESSZST must be a Bash array in makepkg.conf)
           cat > /home/builder/.makepkg.conf << 'EOF'
           MAKEFLAGS="-j$(nproc)"
           COMPRESSZST=(zstd -c -T0 --ultra -20 -)
@@ -127,15 +126,15 @@ jobs:
             export CC=clang
             export CXX=clang++
 
-            export CFLAGS="-O3 -pipe -march=znver3 -mtune=znver3 -fno-plt -ffunction-sections -fdata-sections"
+            export CFLAGS="-O2 -pipe -march=znver3 -mtune=znver3 -fno-plt -ffunction-sections -fdata-sections"
             export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O2,--as-needed,--gc-sections,--pack-dyn-relocs=relr"
+            export LDFLAGS="-fuse-ld=lld -Wl,-O2,--as-needed,--gc-sections,-z,pack-relative-relocs"
 
-            export RUSTFLAGS="-C target-cpu=znver3 -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe -C link-arg=-Wl,--pack-dyn-relocs=relr -C link-arg=-Wl,--strip-all"
+            export RUSTFLAGS="-C target-cpu=znver3 -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe -C link-arg=-Wl,-z,pack-relative-relocs"
 
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL=2
             export CARGO_PROFILE_RELEASE_LTO=fat
             export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-            export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
             export CARGO_PROFILE_RELEASE_PANIC=abort
             export CARGO_PROFILE_RELEASE_DEBUG=0
             export CARGO_PROFILE_RELEASE_STRIP=symbols
