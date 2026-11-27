@@ -15,7 +15,32 @@ jobs:
       image: archlinux:latest
 
     steps:
+      - name: Check upstream commit and existing release
+        id: check
+        run: |
+          set -euo pipefail
+          SHA=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/niri-wm/niri/commits/main" \
+            | sed -n 's/.*"sha": "\([0-9a-f]\{7\}\).*/\1/p' | head -n 1)
+          test -n "$SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          # Skip scheduled builds if a release for this commit already exists
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            if curl -fsSL \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases?per_page=10" \
+              | grep -q "g${SHA}"; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Release for commit $SHA already exists. Skipping build."
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Update system and install dependencies
+        if: steps.check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           pacman -Sy --noconfirm archlinux-keyring
@@ -28,27 +53,30 @@ jobs:
             clang llvm lld rust
 
       - name: Create builder user
+        if: steps.check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           useradd -m -s /bin/bash builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
           chmod 0440 /etc/sudoers.d/builder
           mkdir -p /home/builder/.cargo /home/builder/cargo-target
-          chown -R builder:builder /home/builder
 
       - name: Cache Cargo registry and target directory
+        if: steps.check.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: |
             /home/builder/.cargo/registry
             /home/builder/.cargo/git
             /home/builder/cargo-target
-          key: cargo-zen3-thinlto-${{ runner.os }}-v1
+          key: cargo-zen3-thinlto-${{ runner.os }}-${{ steps.check.outputs.sha }}
           restore-keys: |
             cargo-zen3-thinlto-${{ runner.os }}-
 
-      - name: Create PKGBUILD
+      - name: Fix cache ownership and create PKGBUILD
+        if: steps.check.outputs.skip != 'true'
         run: |
+          set -euo pipefail
           cat > /home/builder/PKGBUILD << 'EOF'
           pkgname=niri-git
           pkgver=0
@@ -77,7 +105,7 @@ jobs:
             cd niri
             git describe --long --tags --abbrev=7 2>/dev/null | \
               sed 's/\([^-]*-g\)/r\1/;s/-/./g;s/^v//' || \
-              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+              printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
           }
 
           prepare() {
@@ -95,18 +123,19 @@ jobs:
             export CXXFLAGS="$CFLAGS"
             export LDFLAGS="-Wl,-O2,--as-needed"
 
-            export RUSTFLAGS="-C target-cpu=znver3 -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed"
+            export RUSTFLAGS="-C target-cpu=znver3 -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed"
 
             export CARGO_PROFILE_RELEASE_LTO=thin
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
             export CARGO_PROFILE_RELEASE_PANIC=abort
             export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+            export CARGO_PROFILE_RELEASE_STRIP=symbols
 
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
             export CARGO_TARGET_DIR="/home/builder/cargo-target"
 
-            cargo build --release --frozen -j "${CARGO_BUILD_JOBS:-$(nproc)}"
+            cargo build --release --frozen
           }
 
           package() {
@@ -120,19 +149,22 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
-          chown builder:builder /home/builder/PKGBUILD
+          chown -R builder:builder /home/builder
 
       - name: Build package
+        if: steps.check.outputs.skip != 'true'
         run: |
           set -euo pipefail
           su - builder -c '
             export MAKEFLAGS="-j$(nproc)"
             export CARGO_BUILD_JOBS="$(nproc)"
+            export COMPRESSZST="zstd -c -T0 --ultra -20 -"
             cd ~
             makepkg --noconfirm --needed
           '
 
       - name: Prepare release
+        if: steps.check.outputs.skip != 'true'
         id: pkg
         run: |
           set -euo pipefail
@@ -148,6 +180,7 @@ jobs:
           echo "tag=${VERSION}-zen3" >> "$GITHUB_OUTPUT"
 
       - name: Check if release tag already exists
+        if: steps.check.outputs.skip != 'true'
         id: check_release
         run: |
           set -euo pipefail
@@ -161,13 +194,14 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: steps.check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: niri-zen3-${{ steps.pkg.outputs.version }}
           path: release/*.pkg.tar.zst
 
       - name: Create GitHub Release
-        if: steps.check_release.outputs.exists != 'true'
+        if: steps.check.outputs.skip != 'true' && steps.check_release.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.tag }}
