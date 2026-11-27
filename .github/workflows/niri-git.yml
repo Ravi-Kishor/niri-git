@@ -1,4 +1,4 @@
-name: Build niri-git (Zen3 + Thin LTO)
+name: Build niri-git (Zen3 + Fat LTO)
 
 permissions:
   contents: write
@@ -69,19 +69,27 @@ jobs:
             /home/builder/.cargo/registry
             /home/builder/.cargo/git
             /home/builder/cargo-target
-          key: cargo-zen3-thinlto-${{ runner.os }}-${{ steps.check.outputs.sha }}
+          key: cargo-zen3-fatlto-${{ runner.os }}-${{ steps.check.outputs.sha }}
           restore-keys: |
-            cargo-zen3-thinlto-${{ runner.os }}-
+            cargo-zen3-fatlto-${{ runner.os }}-
 
-      - name: Fix cache ownership and create PKGBUILD
+      - name: Configure makepkg and create PKGBUILD
         if: steps.check.outputs.skip != 'true'
         run: |
           set -euo pipefail
+
+          # Apply makepkg overrides properly (COMPRESSZST must be a Bash array in makepkg.conf)
+          cat > /home/builder/.makepkg.conf << 'EOF'
+          MAKEFLAGS="-j$(nproc)"
+          COMPRESSZST=(zstd -c -T0 --ultra -20 -)
+          PKGEXT='.pkg.tar.zst'
+          EOF
+
           cat > /home/builder/PKGBUILD << 'EOF'
           pkgname=niri-git
           pkgver=0
           pkgrel=1
-          pkgdesc="Scrollable-tiling Wayland compositor (Zen3 + Thin LTO)"
+          pkgdesc="Scrollable-tiling Wayland compositor (Zen3 + Fat LTO)"
           arch=(x86_64)
           url="https://github.com/niri-wm/niri"
           license=(GPL-3.0-or-later)
@@ -119,17 +127,19 @@ jobs:
             export CC=clang
             export CXX=clang++
 
-            export CFLAGS="-O3 -pipe -march=znver3 -mtune=znver3"
+            export CFLAGS="-O3 -pipe -march=znver3 -mtune=znver3 -fno-plt -ffunction-sections -fdata-sections"
             export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-Wl,-O2,--as-needed"
+            export LDFLAGS="-Wl,-O2,--as-needed,--gc-sections,--pack-dyn-relocs=relr"
 
-            export RUSTFLAGS="-C target-cpu=znver3 -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed"
+            export RUSTFLAGS="-C target-cpu=znver3 -C linker=clang -C link-arg=-fuse-ld=lld -C link-arg=-Wl,-O2 -C link-arg=-Wl,--as-needed -C link-arg=-Wl,--gc-sections -C link-arg=-Wl,--icf=safe -C link-arg=-Wl,--pack-dyn-relocs=relr -C link-arg=-Wl,--strip-all"
 
-            export CARGO_PROFILE_RELEASE_LTO=thin
-            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
-            export CARGO_PROFILE_RELEASE_PANIC=abort
+            export CARGO_PROFILE_RELEASE_LTO=fat
+            export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
             export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+            export CARGO_PROFILE_RELEASE_PANIC=abort
+            export CARGO_PROFILE_RELEASE_DEBUG=0
             export CARGO_PROFILE_RELEASE_STRIP=symbols
+            export CARGO_PROFILE_RELEASE_INCREMENTAL=false
 
             export LIBCLANG_PATH="/usr/lib"
             export BINDGEN_EXTRA_CLANG_ARGS="$(pkg-config --cflags libpipewire-0.3 libspa-0.2)"
@@ -149,6 +159,7 @@ jobs:
             install -Dm644 resources/default-config.kdl -t "$pkgdir/usr/share/doc/niri/"
           }
           EOF
+
           chown -R builder:builder /home/builder
 
       - name: Build package
@@ -156,9 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           su - builder -c '
-            export MAKEFLAGS="-j$(nproc)"
             export CARGO_BUILD_JOBS="$(nproc)"
-            export COMPRESSZST="zstd -c -T0 --ultra -20 -"
             cd ~
             makepkg --noconfirm --needed
           '
@@ -175,6 +184,11 @@ jobs:
 
           mkdir -p release
           cp "$PKG_PATH" "release/$PKG_FILE"
+
+          echo "Binary size:"
+          ls -lh /home/builder/cargo-target/release/niri
+          echo "Package size:"
+          ls -lh "release/$PKG_FILE"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=${VERSION}-zen3" >> "$GITHUB_OUTPUT"
@@ -205,7 +219,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.tag }}
-          name: niri-git ${{ steps.pkg.outputs.version }} (Zen3 + Thin LTO)
+          name: niri-git ${{ steps.pkg.outputs.version }} (Zen3 + Fat LTO)
           files: release/*.pkg.tar.zst
           fail_on_unmatched_files: true
         env:
