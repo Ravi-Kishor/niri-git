@@ -77,7 +77,7 @@ jobs:
           set -euo pipefail
           pacman -Syu --noconfirm --noprogressbar
           pacman -S --noconfirm --needed --noprogressbar \
-            base-devel git pkgconf meson ninja cmake zstd \
+            base-devel git pkgconf meson ninja cmake just zstd \
             clang llvm lld mold ccache \
             cairo glib2 jemalloc lcms2 libdisplay-info libdrm \
             libei libglvnd libinput libxcb libxkbcommon \
@@ -122,7 +122,7 @@ jobs:
             systemd-libs tomlplusplus wayland wlroots0.20 xcb-util-wm
           )
           makedepends=(
-            clang llvm lld mold git meson ninja pkgconf wayland-protocols ccache
+            clang llvm lld mold git meson ninja pkgconf just wayland-protocols ccache
           )
           optdepends=(
             'xorg-xwayland: X11 application support'
@@ -152,25 +152,20 @@ jobs:
             export CCACHE_DIR="/home/builder/.cache/ccache"
             export CCACHE_MAXSIZE="2G"
 
-            export CFLAGS="-O3 -g0 -pipe -march=znver3 -mtune=znver3 -fno-plt -fno-math-errno -fno-trapping-math"
+            export CFLAGS="-O3 -g0 -pipe -march=znver3 -mtune=znver3 -flto=thin -fno-plt -fno-math-errno -fno-trapping-math"
             export CXXFLAGS="$CFLAGS"
-            export LDFLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--as-needed -Wl,--gc-sections -Wl,-z,pack-relative-relocs"
+            export LDFLAGS="-fuse-ld=lld -flto=thin -Wl,-O2 -Wl,--as-needed -Wl,--gc-sections -Wl,-z,pack-relative-relocs"
 
-            arch-meson "$srcdir/umbriel" build \
-              --buildtype=release \
-              -Db_lto=true \
-              -Db_lto_mode=thin \
-              -Db_ndebug=true \
-              -Dtests=disabled \
-              -Dharness=disabled
-
-            meson compile -C build
+            just configure release /usr
+            just release
           }
 
           package() {
             cd "$srcdir/umbriel"
-            meson install -C build --destdir "$pkgdir" --no-rebuild
-            install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+            meson install -C build-release --destdir "$pkgdir" --no-rebuild
+            if [[ -f LICENSE ]]; then
+              install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+            fi
           }
           EOF
 
@@ -180,7 +175,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
+          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 -19 -)/' /etc/makepkg.conf
 
           su builder -s /bin/bash -c '
             set -euo pipefail
