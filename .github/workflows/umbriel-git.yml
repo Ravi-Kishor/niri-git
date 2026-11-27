@@ -81,7 +81,7 @@ jobs:
             clang llvm lld mold ccache \
             cairo glib2 jemalloc lcms2 libdisplay-info libdrm \
             libei libglvnd libinput libxcb libxkbcommon \
-            pango pixman systemd-libs tomlplusplus \
+            nlohmann-json pango pixman systemd-libs tomlplusplus \
             wayland wayland-protocols wlroots0.20 xcb-util-wm \
             xorg-xwayland
 
@@ -118,8 +118,9 @@ jobs:
 
           depends=(
             cairo gcc-libs glibc jemalloc lcms2 libdisplay-info libdrm
-            libei libglvnd libinput libxcb libxkbcommon pango pixman
-            systemd-libs tomlplusplus wayland wlroots0.20 xcb-util-wm
+            libei libglvnd libinput libxcb libxkbcommon nlohmann-json
+            pango pixman systemd-libs tomlplusplus wayland wlroots0.20
+            xcb-util-wm
           )
           makedepends=(
             clang llvm lld mold git meson ninja pkgconf just wayland-protocols ccache
@@ -175,7 +176,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 -19 -)/' /etc/makepkg.conf
+          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
 
           su builder -s /bin/bash -c '
             set -euo pipefail
