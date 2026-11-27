@@ -1,0 +1,225 @@
+name: Build umbriel-git (Zen 3 Optimized + Thin LTO)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if a release for the current upstream commit exists"
+        type: boolean
+        default: false
+  # schedule:
+  #   - cron: "0 */12 * * *"
+
+concurrency:
+  group: umbriel-git-znver3-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: https://github.com/noctalia-dev/umbriel.git
+
+jobs:
+  check:
+    name: Resolve upstream and skip if already released
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+      short: ${{ steps.resolve.outputs.short }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Resolve upstream HEAD and check for existing release
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          COMMIT="$(git ls-remote "$UPSTREAM_REPO" HEAD | awk '{print $1}')"
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ERROR: could not resolve upstream HEAD"
+            exit 1
+          }
+
+          SHORT="${COMMIT:0:7}"
+          SKIP=false
+
+          if [[ "$FORCE" != "true" ]] && \
+             gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName -q '.[].tagName' \
+             | grep -q "${SHORT}-znver3-thin"; then
+            SKIP=true
+          fi
+
+          {
+            echo "commit=$COMMIT"
+            echo "short=$SHORT"
+            echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+          echo "Upstream: $COMMIT ($SHORT) | Skip: $SKIP"
+
+  build:
+    name: Build umbriel-git (5600GT Personal)
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    env:
+      UPSTREAM_COMMIT: ${{ needs.check.outputs.commit }}
+
+    steps:
+      - name: Update Arch and install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --noprogressbar
+          pacman -S --noconfirm --needed --noprogressbar \
+            base-devel git pkgconf meson ninja cmake zstd \
+            clang llvm lld mold ccache \
+            cairo glib2 jemalloc lcms2 libdisplay-info libdrm \
+            libei libglvnd libinput libxcb libxkbcommon \
+            pango pixman systemd-libs tomlplusplus \
+            wayland wayland-protocols wlroots0.20 xcb-util-wm \
+            xorg-xwayland
+
+          useradd -m builder
+          install -d -o builder -g builder \
+            /home/builder/umbriel-build \
+            /home/builder/.cache/ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/builder/.cache/ccache
+          key: umbriel-ccache-znver3-${{ needs.check.outputs.commit }}
+          restore-keys: |
+            umbriel-ccache-znver3-
+
+      - name: Pre-clone upstream and create PKGBUILD
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config --global --add safe.directory /home/builder/umbriel-build/src/umbriel
+          git clone --filter=blob:none --no-checkout "$UPSTREAM_REPO" /home/builder/umbriel-build/src/umbriel
+          git -C /home/builder/umbriel-build/src/umbriel checkout --detach "$UPSTREAM_COMMIT"
+
+          cat > /home/builder/umbriel-build/PKGBUILD << 'EOF'
+          pkgname=umbriel-git
+          pkgver=0
+          pkgrel=1
+          pkgdesc="Wayland compositor with scrolling, dwindle, master & stacking layouts (Ryzen 5600GT znver3 + Thin LTO)"
+          arch=(x86_64)
+          url="https://github.com/noctalia-dev/umbriel"
+          license=(MIT)
+
+          depends=(
+            cairo gcc-libs glibc jemalloc lcms2 libdisplay-info libdrm
+            libei libglvnd libinput libxcb libxkbcommon pango pixman
+            systemd-libs tomlplusplus wayland wlroots0.20 xcb-util-wm
+          )
+          makedepends=(
+            clang llvm lld mold git meson ninja pkgconf wayland-protocols ccache
+          )
+          optdepends=(
+            'xorg-xwayland: X11 application support'
+            'xdg-desktop-portal-umbriel: screen sharing and portal integration'
+          )
+
+          provides=(umbriel wayland-compositor)
+          conflicts=(umbriel)
+
+          options=(!lto !debug strip)
+
+          pkgver() {
+            cd "$srcdir/umbriel"
+            local _ver
+            _ver=$(cat VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.1.0")
+            printf "%s.r%s.%s" "$_ver" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+          }
+
+          build() {
+            cd "$srcdir/umbriel"
+
+            export CC="ccache clang"
+            export CXX="ccache clang++"
+            export AR=llvm-ar
+            export NM=llvm-nm
+            export RANLIB=llvm-ranlib
+            export CCACHE_DIR="/home/builder/.cache/ccache"
+            export CCACHE_MAXSIZE="2G"
+
+            export CFLAGS="-O3 -g0 -pipe -march=znver3 -mtune=znver3 -fno-plt -fno-math-errno -fno-trapping-math"
+            export CXXFLAGS="$CFLAGS"
+            export LDFLAGS="-fuse-ld=lld -Wl,-O2 -Wl,--as-needed -Wl,--gc-sections -Wl,-z,pack-relative-relocs"
+
+            arch-meson "$srcdir/umbriel" build \
+              --buildtype=release \
+              -Db_lto=true \
+              -Db_lto_mode=thin \
+              -Db_ndebug=true \
+              -Dtests=disabled \
+              -Dharness=disabled
+
+            meson compile -C build
+          }
+
+          package() {
+            cd "$srcdir/umbriel"
+            meson install -C build --destdir "$pkgdir" --no-rebuild
+            install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+          }
+          EOF
+
+          chown -R builder:builder /home/builder
+
+      - name: Build package
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -T0 --ultra -22 -)/' /etc/makepkg.conf
+
+          su builder -s /bin/bash -c '
+            set -euo pipefail
+            export PACKAGER="Ravi Kishor <github@ravi>"
+            export MAKEFLAGS="-j$(nproc)"
+            cd /home/builder/umbriel-build
+            makepkg --nodeps --noextract --clean --noconfirm
+            ccache -s || true
+          '
+
+      - name: Prepare release
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_PATH="$(find /home/builder/umbriel-build -maxdepth 1 -type f -name 'umbriel-git-*-x86_64.pkg.tar.zst' -print -quit)"
+          [[ -n "$PKG_PATH" ]] || { echo "ERROR: Built package not found"; exit 1; }
+
+          PKG_FILE="$(basename "$PKG_PATH")"
+          VERSION="$(echo "$PKG_FILE" | sed -E 's/^umbriel-git-(.*)-x86_64\.pkg\.tar\.zst/\1/')"
+
+          mkdir -p release
+          NEW_FILE="umbriel-git-${VERSION}-znver3-thin.pkg.tar.zst"
+          cp "$PKG_PATH" "release/$NEW_FILE"
+          sha256sum "release/$NEW_FILE" > "release/${NEW_FILE}.sha256"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.version }}-znver3-thin
+          name: umbriel-git ${{ steps.pkg.outputs.version }} (Zen 3 + Thin LTO)
+          files: |
+            release/*.pkg.tar.zst
+            release/*.sha256
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
